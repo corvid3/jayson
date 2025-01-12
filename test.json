@@ -1,0 +1,13 @@
+{
+  "foo": "bar",
+  "nested object": {
+    "anarray": [
+      +2, 
+      3.352e5, 
+      4000.234, 
+      "bam", 
+      { "two" : 2 }
+    ]
+  }, 
+  "negative-number": -5.5e1
+}
