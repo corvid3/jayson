@@ -5,15 +5,20 @@
 #include <iostream>
 #include <sstream>
 
-int
-main()
+void
+open(auto path)
 {
-  std::ifstream data("./test.json");
+  std::ifstream data(path);
   std::stringstream ss;
   ss << data.rdbuf();
 
   jayson_val value = jayson_val::parse(ss.str());
-  auto dump = value.serialize();
-  jayson_val value_reparsed = jayson_val::parse(dump);
-  // printf("%s\n", dump.c_str());
+}
+
+int
+main()
+{
+  open("./twitter.json");
+  open("./canada.json");
+  open("./citm_catalog.json");
 }

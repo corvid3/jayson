@@ -53,15 +53,36 @@ struct Token
   std::span<char const> m_span;
 };
 
+[[gnu::always_inline]]
+static inline bool
+jayson_isspace(char const c)
+{
+  return c == ' ' or c == '\n';
+}
+
+[[gnu::always_inline]] static inline bool
+jayson_isdigit(char const c)
+{
+  return c >= '0' and c <= '9';
+}
+
+[[gnu::always_inline]] static inline bool
+jayson_isalpha(char const c)
+{
+  return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z');
+}
+
 std::vector<Token>
 tokenate(std::string_view src)
 {
   std::vector<Token> tokens;
+  tokens.reserve(src.size() / 25);
+
   unsigned idx = 0;
   unsigned tmp = 0;
 
-  auto skip_whitespace = [&] {
-    while (isspace(src[idx]))
+  auto skip_whitespace = [&] [[gnu::always_inline]] () {
+    while (jayson_isspace(src[idx]))
       idx++;
   };
 
@@ -70,23 +91,23 @@ tokenate(std::string_view src)
     if (src[idx] == '+' or src[idx] == '-') {
       idx++;
 
-      if (not isdigit(src[idx]))
+      if (not jayson_isdigit(src[idx]))
         throw std::runtime_error(
           "invalid tokens after + or - symbol in number");
     }
 
-    while (isdigit(src[idx]))
+    while (jayson_isdigit(src[idx]))
       idx++;
 
     if (src[idx] == '.') {
       idx++;
-      while (isdigit(src[idx]))
+      while (jayson_isdigit(src[idx]))
         idx++;
     }
 
     if (src[idx] == 'e') {
       idx++;
-      while (isdigit(src[idx]))
+      while (jayson_isdigit(src[idx]))
         idx++;
     }
 
@@ -139,9 +160,9 @@ tokenate(std::string_view src)
         break;
 
       default: {
-        if (isdigit(src[idx]) or src[idx] == '-' or src[idx] == '+')
+        if (jayson_isdigit(src[idx]) or src[idx] == '-' or src[idx] == '+')
           tokens.push_back({ Token::Type::Number, lex_number() });
-        else if (isalpha(src[idx])) {
+        else if (jayson_isalpha(src[idx])) {
           tmp = idx;
           while (idx < src.size() and isalpha(src[idx]))
             idx++;
@@ -248,6 +269,19 @@ static jayson_val
 parse_array(std::span<Token const>& tok)
 {
   std::vector<jayson_val> vals;
+
+  unsigned balance = 1;
+  unsigned len = 0;
+  for (auto iter = tok.begin(); iter != tok.end() and balance != 0;
+       iter++, len++) {
+    auto const type = iter->m_type;
+    if (type == Token::Type::LeftBracket)
+      balance++;
+    else if (type == Token::Type::RightBracket)
+      balance--;
+  }
+
+  vals.reserve(len / 2);
 
   while (tok.front().m_type != Token::Type::RightBracket) {
     vals.push_back(parse(tok));

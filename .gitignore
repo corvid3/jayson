@@ -1,2 +1,15 @@
 a.out
 
+perf.data
+perf.data.old
+
+# these are files i'm using
+# to perf locally
+# they don't need to be uploaded
+canada.json
+twitter.json
+citm_catalog.json
+nlohman.cc
+nlohmann
+
+
