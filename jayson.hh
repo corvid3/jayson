@@ -26,7 +26,7 @@ public:
   using jayson_val_impl::variant;
   static jayson_val parse(std::string_view);
 
-  std::string debug_dump();
+  std::string serialize(bool pretty = false);
 };
 
 #ifdef JAYSON_IMPL
@@ -129,8 +129,11 @@ tokenate(std::string_view src)
 
       case '"':
         tmp = ++idx;
-        while (src[idx] != '"')
+        while (src[idx] != '"') {
+          if (src[idx] == '\\' and src[idx + 1] == '\"')
+            idx++;
           idx++;
+        }
         tokens.push_back({ Token::Type::String, { &src[tmp], &src[idx] } });
         idx++;
         break;
@@ -138,9 +141,30 @@ tokenate(std::string_view src)
       default: {
         if (isdigit(src[idx]) or src[idx] == '-' or src[idx] == '+')
           tokens.push_back({ Token::Type::Number, lex_number() });
-        else
+        else if (isalpha(src[idx])) {
+          tmp = idx;
+          while (idx < src.size() and isalpha(src[idx]))
+            idx++;
+          std::string_view view(&src[tmp], &src[idx]);
+          if (view == "true")
+            tokens.push_back({ Token::Type::True, view });
+          else if (view == "false")
+            tokens.push_back({ Token::Type::False, view });
+          else if (view == "null")
+            tokens.push_back({ Token::Type::Null, view });
+          else
+            goto err;
+        } else {
+        err:
+          std::string_view t{ &src[std::max<int>(idx - 10, 0)],
+                              &src[std::min<int>(src.size(), idx + 10)] };
           throw std::runtime_error(std::format(
-            "unknown symbol found in jayson lexer: {} {}", idx, (int)src[idx]));
+            "unknown symbol found in jayson lexer: {} {} : {}, near: {}",
+            idx,
+            (int)src[idx],
+            (char)src[idx],
+            t));
+        }
       } break;
     }
   }
@@ -290,15 +314,9 @@ jayson_val::parse(std::string_view src)
 struct dump_visitor
 {
   std::stringstream& m_ss;
-  unsigned m_indent = 0;
 
-  dump_visitor(std::stringstream& str, int indent)
-    : m_ss(str)
-    , m_indent(indent)
-  {
-  }
-
-  auto get_indent() { return m_indent * 4; }
+  dump_visitor(std::stringstream& str)
+    : m_ss(str) {};
 
   void operator()(bool b) { m_ss << (b ? "true" : "false"); }
 
@@ -317,19 +335,63 @@ struct dump_visitor
   {
     std::stringstream ss_2;
 
+    ss_2 << '[';
+    for (unsigned i = 0; auto const& v : arr) {
+      std::visit(dump_visitor(ss_2), v);
+      if (i++ != arr.size() - 1)
+        ss_2 << ',';
+    }
+
+    m_ss << ss_2.str() << ']';
+  }
+
+  void operator()(jayson_map const& map)
+  {
+    std::stringstream ss_2;
+
+    ss_2 << '{';
+    for (unsigned i = 0; auto const& v : map) {
+      ss_2 << '\"' << v.first << "\":";
+      std::visit(dump_visitor(ss_2), v.second);
+      if (i++ != map.size() - 1)
+        ss_2 << ',';
+    }
+
+    m_ss << ss_2.str() << '}';
+  }
+};
+
+struct pretty_dump_visitor : dump_visitor
+{
+  int m_indent;
+
+  using dump_visitor::operator();
+
+  pretty_dump_visitor(std::stringstream& str, int indent)
+    : dump_visitor(str)
+    , m_indent(indent)
+  {
+  }
+
+  auto get_indent() { return m_indent * 4; }
+
+  void operator()(jayson_array const& arr)
+  {
+    std::stringstream ss_2;
+
     m_indent++;
     ss_2 << "[\n";
     for (unsigned i = 0; auto const& v : arr) {
       ss_2 << std::setw(get_indent()) << "";
-      std::visit(dump_visitor(ss_2, m_indent), v);
+      std::visit(pretty_dump_visitor(ss_2, m_indent), v);
       if (i++ != arr.size() - 1)
         ss_2 << ',';
-      ss_2 << "\n";
+
+      ss_2 << '\n';
     }
     m_indent--;
 
-    m_ss << ss_2.str();
-    m_ss << std::setw(get_indent()) << "" << "]";
+    m_ss << ss_2.str() << std::setw(get_indent()) << "" << ']';
   }
 
   void operator()(jayson_map const& map)
@@ -341,23 +403,25 @@ struct dump_visitor
     for (unsigned i = 0; auto const& v : map) {
       ss_2 << std::setw(get_indent()) << "";
       ss_2 << '\"' << v.first << '\"' << ": ";
-      std::visit(dump_visitor(ss_2, m_indent), v.second);
+      std::visit(pretty_dump_visitor(ss_2, m_indent), v.second);
       if (i++ != map.size() - 1)
         ss_2 << ',';
-      ss_2 << "\n";
+      ss_2 << '\n';
     }
     m_indent--;
 
-    m_ss << ss_2.str();
-    m_ss << std::setw(get_indent()) << "" << "}";
+    m_ss << ss_2.str() << std::setw(get_indent()) << "" << '}';
   }
 };
 
 std::string
-jayson_val::debug_dump()
+jayson_val::serialize(bool pretty)
 {
   std::stringstream ss;
-  std::visit(dump_visitor(ss, 0), *this);
+  if (pretty)
+    std::visit(pretty_dump_visitor(ss, 0), *this);
+  else
+    std::visit(dump_visitor(ss), *this);
   return ss.str();
 }
 
