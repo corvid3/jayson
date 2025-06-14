@@ -9,8 +9,10 @@
 struct inner
 {
   int x;
+  std::tuple<int, std::string> y;
 
-  using jayson_fields = std::tuple<jayson::obj_field<"mi", &inner::x>>;
+  using jayson_fields = std::tuple<jayson::obj_field<"mi", &inner::x>,
+                                   jayson::obj_field<"lo", &inner::y>>;
 };
 
 struct test
@@ -29,8 +31,8 @@ main()
 {
   test m;
 
-  auto const js =
-    jayson::val::parse(R"({ "x": 1, "boogus": "m", "in": [{"mi": 2}] })");
+  auto const js = jayson::val::parse(
+    R"({ "x": 1, "boogus": "m", "in": [{"mi": 2, "lo": [1, "hi"]}] })");
 
   jayson::deserialize(js, m);
 

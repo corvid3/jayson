@@ -219,6 +219,27 @@ void inline deserialize(val const& from, std::vector<T>& into)
   }
 }
 
+template<typename... Ts, std::size_t... Is>
+void inline _deser_impl_tupl(val const& from,
+                             std::tuple<Ts...>& into,
+                             std::index_sequence<Is...>)
+{
+  auto const& arr = from.as<array>();
+
+  (deserialize(arr.at(Is), std::get<Is>(into)), ...);
+}
+
+template<typename... Ts>
+void inline deserialize(val const& from, std::tuple<Ts...>& into)
+{
+  if (not std::holds_alternative<array>(from))
+    throw std::runtime_error(std::format(
+      "expected an array while deserializing a jayson object, found <{}>",
+      std::visit(val_typename_visitor(), from)));
+
+  _deser_impl_tupl(from, into, std::index_sequence_for<Ts...>());
+}
+
 template<typename T>
   requires(has_jayson_descriptor_fields<T>)
 auto inline serialize(T const& t);
@@ -237,6 +258,15 @@ template<typename T>
 auto inline serialize(T const& t)
 {
   return val((type_consolidator::get<T>)(t));
+}
+
+template<typename... Ts>
+auto inline serialize(std::tuple<Ts...> const& t)
+{
+  array out;
+  std::apply(
+    [&](auto const&... args) { (out.push_back(serialize(args)), ...); }, t);
+  return out;
 }
 
 template<typename T>
