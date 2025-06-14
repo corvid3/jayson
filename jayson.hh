@@ -4,6 +4,7 @@
 //  #define JAYSON_IMPL
 // in at least one _source_ file
 
+#include <array>
 #include <concepts>
 #include <format>
 #include <functional>
@@ -131,8 +132,15 @@ struct type_consolidator
   static double consol(is_number auto const);
   static std::string consol(std::convertible_to<std::string_view> auto const);
   static obj consol(has_jayson_descriptor_fields auto const);
+
   template<typename T>
   static array consol(std::vector<T> const);
+
+  template<typename T, auto N>
+  static array consol(std::array<T, N> const);
+
+  template<typename... Ts>
+  static array consol(std::tuple<Ts...> const);
 
   template<typename T>
   using get = decltype(consol(std::declval<T>()));
@@ -219,6 +227,35 @@ void inline deserialize(val const& from, std::vector<T>& into)
   }
 }
 
+template<typename T, auto N>
+void inline deserialize(val const& from, std::array<T, N>& into)
+{
+  if (not std::holds_alternative<array>(from))
+    throw std::runtime_error(std::format(
+      "expected an array while deserializing a jayson object, found <{}>",
+      std::visit(val_typename_visitor(), from)));
+
+  auto const& arr = from.as<array>();
+
+  if (arr.size() != N)
+    throw std::runtime_error("array size mismatch in jayson");
+
+  for (auto i = 0; i < N; i++) {
+    T n;
+
+    auto const& t = arr.at(i);
+
+    if (not std::holds_alternative<type_consolidator::get<T>>(t))
+      throw std::runtime_error(std::format(
+        "expected an {} while deserializing a jayson object, found <{}>",
+        std::visit(val_typename_visitor(), val(type_consolidator::get<T>())),
+        std::visit(val_typename_visitor(), t)));
+
+    deserialize(t, n);
+    into[i] = std::move(n);
+  }
+}
+
 template<typename... Ts, std::size_t... Is>
 void inline _deser_impl_tupl(val const& from,
                              std::tuple<Ts...>& into,
@@ -266,6 +303,15 @@ auto inline serialize(std::tuple<Ts...> const& t)
   array out;
   std::apply(
     [&](auto const&... args) { (out.push_back(serialize(args)), ...); }, t);
+  return out;
+}
+
+template<typename T, auto N>
+auto inline serialize(std::array<T, N> const& t)
+{
+  array out;
+  for (auto const& v : t)
+    out.push_back(serialize(v));
   return out;
 }
 

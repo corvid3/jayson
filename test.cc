@@ -9,7 +9,7 @@
 struct inner
 {
   int x;
-  std::tuple<int, std::string> y;
+  std::array<int, 2> y;
 
   using jayson_fields = std::tuple<jayson::obj_field<"mi", &inner::x>,
                                    jayson::obj_field<"lo", &inner::y>>;
