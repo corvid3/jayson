@@ -128,8 +128,14 @@ concept has_jayson_descriptor_fields = requires { typename T::jayson_fields; };
 
 struct type_consolidator
 {
-  double operator()(is_number auto const);
-  std::string operator()(std::convertible_to<std::string_view> auto const);
+  static double consol(is_number auto const);
+  static std::string consol(std::convertible_to<std::string_view> auto const);
+  static obj consol(has_jayson_descriptor_fields auto const);
+  template<typename T>
+  static array consol(std::vector<T> const);
+
+  template<typename T>
+  using get = decltype(consol(std::declval<T>()));
 };
 
 template<has_jayson_descriptor_fields T>
@@ -190,15 +196,52 @@ void inline deserialize(val const& from, std::string& into)
 }
 
 template<typename T>
-  requires(not has_jayson_descriptor_fields<T>)
-auto inline serialize(T const& t)
+void inline deserialize(val const& from, std::vector<T>& into)
 {
-  return val(decltype(type_consolidator()(t))(t));
+  if (not std::holds_alternative<array>(from))
+    throw std::runtime_error(std::format(
+      "expected an array while deserializing a jayson object, found <{}>",
+      std::visit(val_typename_visitor(), from)));
+
+  auto const& arr = from.as<array>();
+
+  for (auto const& t : arr) {
+    T n;
+
+    if (not std::holds_alternative<type_consolidator::get<T>>(t))
+      throw std::runtime_error(std::format(
+        "expected an {} while deserializing a jayson object, found <{}>",
+        std::visit(val_typename_visitor(), val(type_consolidator::get<T>())),
+        std::visit(val_typename_visitor(), t)));
+
+    deserialize(t, n);
+    into.push_back(std::move(n));
+  }
 }
 
 template<typename T>
   requires(has_jayson_descriptor_fields<T>)
-obj inline serialize(T const& t)
+auto inline serialize(T const& t);
+
+template<typename T>
+auto inline serialize(std::vector<T> const& t)
+{
+  array out;
+  for (auto const& v : t)
+    out.push_back(serialize(v));
+  return out;
+}
+
+template<typename T>
+  requires(not has_jayson_descriptor_fields<T>)
+auto inline serialize(T const& t)
+{
+  return val((type_consolidator::get<T>)(t));
+}
+
+template<typename T>
+  requires(has_jayson_descriptor_fields<T>)
+auto inline serialize(T const& t)
 {
   obj out;
 
