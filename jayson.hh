@@ -1,5 +1,10 @@
 #pragma once
 
+// NOTE: make sure you include this file with
+//  #define JAYSON_IMPL
+// in at least one _source_ file
+
+#include <concepts>
 #include <format>
 #include <functional>
 #include <iomanip>
@@ -8,9 +13,13 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
+
+#include <lexible.hh>
 
 namespace jayson {
 
@@ -21,6 +30,17 @@ class val;
 using array = std::vector<val>;
 using obj = std::map<std::string, val, std::less<>>;
 using val_impl = std::variant<nil, double, bool, std::string, array, obj>;
+
+struct val_typename_visitor
+{
+  std::string_view operator()(nil const) const { return "nil"; }
+  std::string_view operator()(double const) const { return "number"; }
+  std::string_view operator()(bool const) const { return "bool"; }
+  std::string_view operator()(std::string const) const { return "string"; }
+  std::string_view operator()(array const) const { return "array"; }
+  std::string_view operator()(obj const) const { return "object"; }
+};
+
 class val : public val_impl
 {
 
@@ -78,8 +98,141 @@ public:
   }
 };
 
+template<auto N>
+struct comptime_str
+{
+  constexpr comptime_str(char const (&str)[N])
+  {
+    std::copy(str, str + N - 1, data);
+  }
+
+  char data[N]{};
+
+  constexpr operator std::string_view() const { return { data, data + N - 1 }; }
+};
+
+template<comptime_str FIELD_NAME, auto FIELD_PTR, bool REQUIRED = true>
+struct obj_field
+{
+  std::string_view static constexpr name = FIELD_NAME;
+  auto static constexpr ptr = FIELD_PTR;
+  bool static constexpr required = REQUIRED;
+};
+
+template<typename T>
+concept is_number =
+  requires { requires std::integral<T> or std::floating_point<T>; };
+
+template<typename T>
+concept has_jayson_descriptor_fields = requires { typename T::jayson_fields; };
+
+struct type_consolidator
+{
+  double operator()(is_number auto const);
+  std::string operator()(std::convertible_to<std::string_view> auto const);
+};
+
+template<has_jayson_descriptor_fields T>
+void
+deserialize(val const& from, T& into)
+{
+  using fields = T::jayson_fields;
+
+  if (not std::holds_alternative<obj>(from))
+    throw std::runtime_error(
+      "when attempting to deserialize a jayson value into a data structure, "
+      "expected an object and did not find one");
+
+  obj const& object = from.as<obj>();
+
+  std::apply(
+    [&]<typename... Ts>(Ts&&... args) {
+      (
+        [&]<typename FIELD>(FIELD) {
+          auto const from_field = object.find(Ts::name);
+
+          if (from_field == object.end()) {
+            if (FIELD::required)
+              throw std::runtime_error(
+                std::format("unable to find required field {} in jayson object",
+                            FIELD::name));
+            else
+              return;
+          }
+
+          deserialize(from_field->second, into.*Ts::ptr);
+        }(args),
+        ...);
+    },
+    fields());
+}
+
+template<is_number T>
+void
+deserialize(val const& from, T& into)
+{
+  if (not std::holds_alternative<double>(from))
+    throw std::runtime_error(std::format(
+      "expected number while deserializing a jayson object, found <{}>",
+      std::visit(val_typename_visitor(), from)));
+
+  into = from.as<double>();
+}
+
+void inline deserialize(val const& from, std::string& into)
+{
+  if (not std::holds_alternative<std::string>(from))
+    throw std::runtime_error(std::format(
+      "expected string while deserializing a jayson object, found <{}>",
+      std::visit(val_typename_visitor(), from)));
+
+  into = from.as<std::string>();
+}
+
+template<typename T>
+  requires(not has_jayson_descriptor_fields<T>)
+auto inline serialize(T const& t)
+{
+  return val(decltype(type_consolidator()(t))(t));
+}
+
+template<typename T>
+  requires(has_jayson_descriptor_fields<T>)
+obj inline serialize(T const& t)
+{
+  obj out;
+
+  std::apply(
+    [&]<typename... FIELDS>(FIELDS&&...) {
+      (out.insert_or_assign(std::string(FIELDS::name),
+                            serialize(t.*FIELDS::ptr)),
+       ...);
+    },
+    typename T::jayson_fields());
+
+  return out;
+}
+
+};
+
+#ifdef JAYSON_IMPL
+namespace jayson {
+
 class _jayson_impl
 {
+
+  enum class TokenType
+  {
+    LEXIBLE_EOF,
+
+    String,
+    Number,
+
+    TrueLiteral,
+    FalseLiteral,
+  };
+
+  static constexpr std::string_view string_literal_regex = R"()";
 
   struct Token
   {
@@ -467,17 +620,21 @@ class _jayson_impl
   friend class val;
 };
 
-inline val
+val
 val::parse(std::string_view src)
 {
   val val;
 
   std::vector<_jayson_impl::Token> toks = _jayson_impl::tokenate(src);
   std::span<_jayson_impl::Token const> tok_span(toks);
+
+  if (tok_span.size() == 0)
+    return nil{};
+
   return _jayson_impl::parse_extern(tok_span);
 }
 
-inline std::string
+std::string
 val::serialize(bool pretty)
 {
   std::stringstream ss;
@@ -489,3 +646,4 @@ val::serialize(bool pretty)
 }
 
 };
+#endif

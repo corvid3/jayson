@@ -1,3 +1,4 @@
+#include <tuple>
 #define JAYSON_IMPL
 
 #include "jayson.hh"
@@ -5,20 +6,31 @@
 #include <iostream>
 #include <sstream>
 
-void
-open(auto path)
+struct test
 {
-  std::ifstream data(path);
-  std::stringstream ss;
-  ss << data.rdbuf();
+  int x;
+  std::string b;
 
-  jayson_val value = jayson_val::parse(ss.str());
-}
+  using jayson_fields = std::tuple<jayson::obj_field<"x", &test::x>,
+                                   jayson::obj_field<"boogus", &test::b>>;
+};
 
 int
 main()
 {
-  open("./twitter.json");
-  open("./canada.json");
-  open("./citm_catalog.json");
+  test m;
+
+  auto const js = jayson::val::parse(R"({ "x": 1, "boogus": "m" })");
+
+  jayson::deserialize(js, m);
+
+  std::cout << std::format("{}, {}", m.x, m.b);
+
+  auto ser = jayson::serialize(m);
+
+  test m2;
+
+  jayson::deserialize(ser, m2);
+
+  std::cout << std::format("{}, {}", m2.x, m2.b);
 }
