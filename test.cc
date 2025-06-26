@@ -20,10 +20,12 @@ struct test
   int x;
   std::string b;
   std::vector<inner> in;
+  std::map<std::string, int> map;
 
   using jayson_fields = std::tuple<jayson::obj_field<"x", &test::x>,
                                    jayson::obj_field<"boogus", &test::b>,
-                                   jayson::obj_field<"in", &test::in>>;
+                                   jayson::obj_field<"in", &test::in>,
+                                   jayson::obj_field<"map", &test::map>>;
 };
 
 int

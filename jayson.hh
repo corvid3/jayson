@@ -24,6 +24,10 @@
 
 namespace jayson {
 
+template<typename T>
+concept is_number =
+  requires { requires std::integral<T> or std::floating_point<T>; };
+
 struct nil
 {};
 
@@ -35,7 +39,7 @@ using val_impl = std::variant<nil, double, bool, std::string, array, obj>;
 struct val_typename_visitor
 {
   std::string_view operator()(nil const) const { return "nil"; }
-  std::string_view operator()(double const) const { return "number"; }
+  std::string_view operator()(double) const { return "number"; }
   std::string_view operator()(bool const) const { return "bool"; }
   std::string_view operator()(std::string const) const { return "string"; }
   std::string_view operator()(array const) const { return "array"; }
@@ -121,10 +125,6 @@ struct obj_field
 };
 
 template<typename T>
-concept is_number =
-  requires { requires std::integral<T> or std::floating_point<T>; };
-
-template<typename T>
 concept has_jayson_descriptor_fields = requires { typename T::jayson_fields; };
 
 struct type_consolidator
@@ -132,6 +132,9 @@ struct type_consolidator
   static double consol(is_number auto const);
   static std::string consol(std::convertible_to<std::string_view> auto const);
   static obj consol(has_jayson_descriptor_fields auto const);
+
+  template<typename T>
+  static obj consol(std::map<std::string, T> const);
 
   template<typename T>
   static array consol(std::vector<T> const);
@@ -153,9 +156,10 @@ deserialize(val const& from, T& into)
   using fields = T::jayson_fields;
 
   if (not std::holds_alternative<obj>(from))
-    throw std::runtime_error(
+    throw std::runtime_error(std::format(
       "when attempting to deserialize a jayson value into a data structure, "
-      "expected an object and did not find one");
+      "expected an object but found {}",
+      std::visit(val_typename_visitor(), from)));
 
   obj const& object = from.as<obj>();
 
@@ -256,6 +260,30 @@ void inline deserialize(val const& from, std::array<T, N>& into)
   }
 }
 
+template<typename T>
+void inline deserialize(val const& from, std::map<std::string, T>& into)
+{
+  if (not std::holds_alternative<obj>(from))
+    throw std::runtime_error(std::format(
+      "expected an obj while deserializing a jayson object, found <{}>",
+      std::visit(val_typename_visitor(), from)));
+
+  auto const& arr = from.as<obj>();
+
+  using T_casted = type_consolidator::get<T>;
+
+  for (auto const& [k, v] : arr) {
+    if (not std::holds_alternative<T_casted>(v))
+      throw std::runtime_error(
+        std::format("expected an {} while deserializing a jayson object into a "
+                    "map, found <{}>",
+                    std::visit(val_typename_visitor(), val(T_casted())),
+                    std::visit(val_typename_visitor(), from)));
+
+    into.insert_or_assign(k, T(v.as<T_casted>()));
+  }
+}
+
 template<typename... Ts, std::size_t... Is>
 void inline _deser_impl_tupl(val const& from,
                              std::tuple<Ts...>& into,
@@ -280,14 +308,20 @@ void inline deserialize(val const& from, std::tuple<Ts...>& into)
 template<typename T>
   requires(has_jayson_descriptor_fields<T>)
 auto inline serialize(T const& t);
+template<typename T>
+  requires(not has_jayson_descriptor_fields<T>)
+auto inline serialize(T const& t);
+
+template<typename... Ts>
+auto inline serialize(std::tuple<Ts...> const& t);
 
 template<typename T>
 auto inline serialize(std::vector<T> const& t)
 {
   array out;
   for (auto const& v : t)
-    out.push_back(serialize(v));
-  return out;
+    out.emplace_back(serialize(v));
+  return val(out);
 }
 
 template<typename T>
@@ -303,7 +337,7 @@ auto inline serialize(std::tuple<Ts...> const& t)
   array out;
   std::apply(
     [&](auto const&... args) { (out.push_back(serialize(args)), ...); }, t);
-  return out;
+  return val(out);
 }
 
 template<typename T, auto N>
@@ -312,7 +346,18 @@ auto inline serialize(std::array<T, N> const& t)
   array out;
   for (auto const& v : t)
     out.push_back(serialize(v));
-  return out;
+  return val(out);
+}
+
+template<typename T>
+auto inline serialize(std::map<std::string, T> const& map)
+{
+  using T_casted = type_consolidator::get<T>;
+
+  obj out;
+  for (auto const& [k, v] : map)
+    out.insert_or_assign(k, T_casted(v));
+  return val(out);
 }
 
 template<typename T>
@@ -329,7 +374,7 @@ auto inline serialize(T const& t)
     },
     typename T::jayson_fields());
 
-  return out;
+  return val(out);
 }
 
 };
