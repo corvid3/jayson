@@ -436,13 +436,16 @@ class _jayson_impl
     return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z');
   }
 
-  static std::vector<Token> tokenate(std::span<char const> src)
+  static std::vector<Token> tokenate(std::string_view src)
   {
     std::vector<Token> tokens;
     tokens.reserve(src.size() / 25);
 
     unsigned idx = 0;
     unsigned tmp = 0;
+
+    auto const current_ptr = [&]() { return src.begin() + idx; };
+    auto const next_ptr = [&]() { return src.begin() + (++idx); };
 
     auto skip_whitespace = [&] [[gnu::always_inline]] () {
       while (isspace(src[idx]))
@@ -474,7 +477,7 @@ class _jayson_impl
           idx++;
       }
 
-      return std::string_view{ &src[leftside_begin], &src[idx] };
+      return std::string_view{ &src[leftside_begin], current_ptr() };
     };
 
     while (idx < src.size()) {
@@ -485,30 +488,32 @@ class _jayson_impl
       switch (src[idx]) {
         case '{':
           tokens.push_back(
-            { Token::Type::LeftBrace, { &src[idx], &src[++idx] } });
+            { Token::Type::LeftBrace, { current_ptr(), next_ptr() } });
           break;
 
         case '}':
           tokens.push_back(
-            { Token::Type::RightBrace, { &src[idx], &src[++idx] } });
+            { Token::Type::RightBrace, { current_ptr(), next_ptr() } });
           break;
 
         case '[':
           tokens.push_back(
-            { Token::Type::LeftBracket, { &src[idx], &src[++idx] } });
+            { Token::Type::LeftBracket, { current_ptr(), next_ptr() } });
           break;
 
         case ']':
           tokens.push_back(
-            { Token::Type::RightBracket, { &src[idx], &src[++idx] } });
+            { Token::Type::RightBracket, { current_ptr(), next_ptr() } });
           break;
 
         case ':':
-          tokens.push_back({ Token::Type::Colon, { &src[idx], &src[++idx] } });
+          tokens.push_back(
+            { Token::Type::Colon, { current_ptr(), next_ptr() } });
           break;
 
         case ',':
-          tokens.push_back({ Token::Type::Comma, { &src[idx], &src[++idx] } });
+          tokens.push_back(
+            { Token::Type::Comma, { current_ptr(), next_ptr() } });
           break;
 
         case '"':
@@ -518,7 +523,8 @@ class _jayson_impl
               idx++;
             idx++;
           }
-          tokens.push_back({ Token::Type::String, { &src[tmp], &src[idx] } });
+          tokens.push_back(
+            { Token::Type::String, { &src[tmp], current_ptr() } });
           idx++;
           break;
 
@@ -529,7 +535,7 @@ class _jayson_impl
             tmp = idx;
             while (idx < src.size() and isalpha(src[idx]))
               idx++;
-            std::string_view view(&src[tmp], &src[idx]);
+            std::string_view view(&src[tmp], current_ptr());
             if (view == "true")
               tokens.push_back({ Token::Type::True, view });
             else if (view == "false")
