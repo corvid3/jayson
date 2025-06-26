@@ -436,7 +436,7 @@ class _jayson_impl
     return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z');
   }
 
-  static std::vector<Token> tokenate(std::string_view src)
+  static std::vector<Token> tokenate(std::span<char const> src)
   {
     std::vector<Token> tokens;
     tokens.reserve(src.size() / 25);
