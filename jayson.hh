@@ -9,6 +9,7 @@
 #include <format>
 #include <functional>
 #include <iomanip>
+#include <list>
 #include <map>
 #include <span>
 #include <sstream>
@@ -146,12 +147,45 @@ struct type_consolidator
   static array consol(std::tuple<Ts...> const);
 
   template<typename T>
+  static auto consol(std::optional<T>) -> decltype(consol(T()));
+
+  template<typename T>
   using get = decltype(consol(std::declval<T>()));
 };
 
+template<typename T>
+struct member_ptr_destructure;
+
+template<typename C, typename T>
+struct member_ptr_destructure<T C::*>
+{
+  using value_type = T;
+};
+
+template<typename C, typename T>
+struct member_ptr_destructure<T C::* const>
+{
+  using value_type = T;
+};
+
+template<typename T>
+using member_ptr_destructure_t = typename member_ptr_destructure<T>::value_type;
+
+template<typename T>
+struct array_size_destructure;
+
+template<typename T, auto N>
+struct array_size_destructure<std::array<T, N>>
+{
+  static constexpr auto size = N;
+};
+
+template<typename T>
+auto constexpr array_size_destructure_v = array_size_destructure<T>::size;
+
 template<has_jayson_descriptor_fields T>
-void
-deserialize(val const& from, T& into)
+T
+deserialize(val const& from)
 {
   using fields = T::jayson_fields;
 
@@ -162,6 +196,8 @@ deserialize(val const& from, T& into)
       std::visit(val_typename_visitor(), from)));
 
   obj const& object = from.as<obj>();
+
+  T out;
 
   std::apply(
     [&]<typename... Ts>(Ts&&... args) {
@@ -178,37 +214,61 @@ deserialize(val const& from, T& into)
               return;
           }
 
-          deserialize(from_field->second, into.*Ts::ptr);
+          out.*Ts::ptr =
+            deserialize<member_ptr_destructure_t<decltype(Ts::ptr)>>(
+              from_field->second);
         }(args),
         ...);
     },
     fields());
+
+  return out;
 }
 
 template<is_number T>
-void
-deserialize(val const& from, T& into)
+T
+deserialize(val const& from)
 {
   if (not std::holds_alternative<double>(from))
     throw std::runtime_error(std::format(
       "expected number while deserializing a jayson object, found <{}>",
       std::visit(val_typename_visitor(), from)));
 
-  into = from.as<double>();
+  return static_cast<T>(from.as<double>());
 }
 
-void inline deserialize(val const& from, std::string& into)
+template<typename T>
+  requires requires(T t) {
+    { std::optional<T>{ t } } -> std::same_as<T>;
+  }
+T inline deserialize(val const& from)
+{
+  using Tc = type_consolidator::get<typename T::value_type>;
+
+  if (not std::holds_alternative<Tc>(from))
+    throw std::runtime_error(
+      std::format("expected {} while deserializing a jayson object, found <{}>",
+                  val_typename_visitor()(Tc()),
+                  std::visit(val_typename_visitor(), from)));
+
+  return from.as<Tc>();
+}
+
+template<typename T>
+  requires std::same_as<T, std::string>
+T inline deserialize(val const& from)
 {
   if (not std::holds_alternative<std::string>(from))
     throw std::runtime_error(std::format(
       "expected string while deserializing a jayson object, found <{}>",
       std::visit(val_typename_visitor(), from)));
 
-  into = from.as<std::string>();
+  return from.as<std::string>();
 }
 
 template<typename T>
-void inline deserialize(val const& from, std::vector<T>& into)
+  requires std::same_as<T, decltype(std::vector{ std::declval<T>() })>
+T inline deserialize(val const& from)
 {
   if (not std::holds_alternative<array>(from))
     throw std::runtime_error(std::format(
@@ -216,23 +276,24 @@ void inline deserialize(val const& from, std::vector<T>& into)
       std::visit(val_typename_visitor(), from)));
 
   auto const& arr = from.as<array>();
+  T out;
 
   for (auto const& t : arr) {
-    T n;
-
     if (not std::holds_alternative<type_consolidator::get<T>>(t))
       throw std::runtime_error(std::format(
         "expected an {} while deserializing a jayson object, found <{}>",
         std::visit(val_typename_visitor(), val(type_consolidator::get<T>())),
         std::visit(val_typename_visitor(), t)));
 
-    deserialize(t, n);
-    into.push_back(std::move(n));
+    out.push_back(deserialize<typename T::value_type>(t));
   }
+
+  return out;
 }
 
-template<typename T, auto N>
-void inline deserialize(val const& from, std::array<T, N>& into)
+template<typename T>
+  requires std::same_as<T, decltype(std::set{ std::declval<T>() })>
+T inline deserialize(val const& from)
 {
   if (not std::holds_alternative<array>(from))
     throw std::runtime_error(std::format(
@@ -240,13 +301,63 @@ void inline deserialize(val const& from, std::array<T, N>& into)
       std::visit(val_typename_visitor(), from)));
 
   auto const& arr = from.as<array>();
+  T out;
 
-  if (arr.size() != N)
+  for (auto const& t : arr) {
+    if (not std::holds_alternative<type_consolidator::get<T>>(t))
+      throw std::runtime_error(std::format(
+        "expected an {} while deserializing a jayson object, found <{}>",
+        std::visit(val_typename_visitor(), val(type_consolidator::get<T>())),
+        std::visit(val_typename_visitor(), t)));
+
+    out.insert(deserialize<typename T::value_type>(t));
+  }
+
+  return out;
+}
+
+template<typename T>
+  requires std::same_as<T, decltype(std::list{ std::declval<T>() })>
+T inline deserialize(val const& from)
+{
+  if (not std::holds_alternative<array>(from))
+    throw std::runtime_error(std::format(
+      "expected an array while deserializing a jayson object, found <{}>",
+      std::visit(val_typename_visitor(), from)));
+
+  auto const& arr = from.as<array>();
+  T out;
+
+  for (auto const& t : arr) {
+    if (not std::holds_alternative<type_consolidator::get<T>>(t))
+      throw std::runtime_error(std::format(
+        "expected an {} while deserializing a jayson object, found <{}>",
+        std::visit(val_typename_visitor(), val(type_consolidator::get<T>())),
+        std::visit(val_typename_visitor(), t)));
+
+    out.push_back(deserialize<typename T::value_type>(t));
+  }
+
+  return out;
+}
+
+template<typename T>
+  requires std::same_as<T, decltype(std::array{ std::declval<T>() })>
+T inline deserialize(val const& from)
+{
+  if (not std::holds_alternative<array>(from))
+    throw std::runtime_error(std::format(
+      "expected an array while deserializing a jayson object, found <{}>",
+      std::visit(val_typename_visitor(), from)));
+
+  auto const& arr = from.as<array>();
+  auto constexpr size = array_size_destructure_v<T>;
+  T into;
+
+  if (arr.size() != size)
     throw std::runtime_error("array size mismatch in jayson");
 
-  for (auto i = 0; i < N; i++) {
-    T n;
-
+  for (auto i = 0; i < size; i++) {
     auto const& t = arr.at(i);
 
     if (not std::holds_alternative<type_consolidator::get<T>>(t))
@@ -255,13 +366,15 @@ void inline deserialize(val const& from, std::array<T, N>& into)
         std::visit(val_typename_visitor(), val(type_consolidator::get<T>())),
         std::visit(val_typename_visitor(), t)));
 
-    deserialize(t, n);
-    into[i] = std::move(n);
+    into[i] = deserialize<typename T::value_type>(t);
   }
+
+  return into;
 }
 
 template<typename T>
-void inline deserialize(val const& from, std::map<std::string, T>& into)
+  requires std::same_as<T, decltype(std::map{ std::declval<T>() })>
+T inline deserialize(val const& from)
 {
   if (not std::holds_alternative<obj>(from))
     throw std::runtime_error(std::format(
@@ -271,6 +384,7 @@ void inline deserialize(val const& from, std::map<std::string, T>& into)
   auto const& arr = from.as<obj>();
 
   using T_casted = type_consolidator::get<T>;
+  T out;
 
   for (auto const& [k, v] : arr) {
     if (not std::holds_alternative<T_casted>(v))
@@ -280,29 +394,40 @@ void inline deserialize(val const& from, std::map<std::string, T>& into)
                     std::visit(val_typename_visitor(), val(T_casted())),
                     std::visit(val_typename_visitor(), from)));
 
-    into.insert_or_assign(k, T(v.as<T_casted>()));
+    out.insert_or_assign(k, T(v.as<T_casted>()));
   }
+
+  return out;
 }
 
-template<typename... Ts, std::size_t... Is>
-void inline _deser_impl_tupl(val const& from,
-                             std::tuple<Ts...>& into,
-                             std::index_sequence<Is...>)
+template<typename T>
+struct index_sequence_for_tuple;
+
+template<typename... Ts>
+struct index_sequence_for_tuple<std::tuple<Ts...>>
+{
+  auto constexpr static value = std::index_sequence_for<Ts...>();
+};
+
+template<typename T, std::size_t... Is>
+// requires std::same_as<T, decltype(std::tuple{ std::declval<T>() })>
+T inline _deser_impl_tupl(val const& from, std::index_sequence<Is...>)
 {
   auto const& arr = from.as<array>();
 
-  (deserialize(arr.at(Is), std::get<Is>(into)), ...);
+  return std::tuple{ deserialize<std::tuple_element_t<Is, T>>(arr.at(Is))... };
 }
 
-template<typename... Ts>
-void inline deserialize(val const& from, std::tuple<Ts...>& into)
+template<typename T>
+  requires std::same_as<T, decltype(std::tuple{ std::declval<T>() })>
+T inline deserialize(val const& from)
 {
   if (not std::holds_alternative<array>(from))
     throw std::runtime_error(std::format(
       "expected an array while deserializing a jayson object, found <{}>",
       std::visit(val_typename_visitor(), from)));
 
-  _deser_impl_tupl(from, into, std::index_sequence_for<Ts...>());
+  return _deser_impl_tupl<T>(from, index_sequence_for_tuple<T>::value);
 }
 
 template<typename T>
@@ -325,10 +450,37 @@ auto inline serialize(std::vector<T> const& t)
 }
 
 template<typename T>
+auto inline serialize(std::set<T> const& t)
+{
+  array out;
+  for (auto const& v : t)
+    out.emplace_back(serialize(v));
+  return val(out);
+}
+
+template<typename T>
+auto inline serialize(std::list<T> const& t)
+{
+  array out;
+  for (auto const& v : t)
+    out.emplace_back(serialize(v));
+  return val(out);
+}
+
+template<typename T>
   requires(not has_jayson_descriptor_fields<T>)
 auto inline serialize(T const& t)
 {
   return val((type_consolidator::get<T>)(t));
+}
+
+template<typename T>
+auto inline serialize(std::optional<T> const& t)
+{
+  if (t)
+    return serialize(*t);
+  else
+    return val(nil());
 }
 
 template<typename... Ts>
