@@ -11,6 +11,7 @@
 #include <iomanip>
 #include <list>
 #include <map>
+#include <print>
 #include <span>
 #include <sstream>
 #include <stdexcept>
@@ -125,8 +126,31 @@ struct obj_field
   bool static constexpr required = REQUIRED;
 };
 
+template<comptime_str FIELD_NAME,
+         auto FIELD_PTR,
+         typename ENUM_DESCRIPTOR,
+         bool REQUIRED = true>
+struct enum_field
+{
+  std::string_view static constexpr name = FIELD_NAME;
+  auto static constexpr ptr = FIELD_PTR;
+  bool static constexpr required = REQUIRED;
+  using descriptor = ENUM_DESCRIPTOR;
+};
+
+template<typename T>
+concept is_enum_field = requires(T t) {
+  { enum_field{ t } } -> std::same_as<T>;
+};
+
 template<typename T>
 concept has_jayson_descriptor_fields = requires { typename T::jayson_fields; };
+template<typename T>
+concept is_jayson_explicitly_constructible = requires {
+  T::jayson_explicitly_constructible;
+  T::jayson_explicitly_constructible == true;
+  // { T::jayson_explicitly_constructible == true } -> std::same_as<bool>;
+};
 
 struct type_consolidator
 {
@@ -140,6 +164,12 @@ struct type_consolidator
   template<typename T>
   static array consol(std::vector<T> const);
 
+  template<typename T>
+  static array consol(std::set<T> const);
+
+  template<typename T>
+  static array consol(std::list<T> const);
+
   template<typename T, auto N>
   static array consol(std::array<T, N> const);
 
@@ -148,6 +178,10 @@ struct type_consolidator
 
   template<typename T>
   static auto consol(std::optional<T>) -> decltype(consol(T()));
+
+  template<typename T>
+    requires std::is_enum_v<T>
+  static std::string consol(T in);
 
   template<typename T>
   using get = decltype(consol(std::declval<T>()));
@@ -184,6 +218,7 @@ template<typename T>
 auto constexpr array_size_destructure_v = array_size_destructure<T>::size;
 
 template<has_jayson_descriptor_fields T>
+  requires(not is_jayson_explicitly_constructible<T>)
 T
 deserialize(val const& from)
 {
@@ -205,7 +240,8 @@ deserialize(val const& from)
         [&]<typename FIELD>(FIELD) {
           auto const from_field = object.find(Ts::name);
 
-          if (from_field == object.end()) {
+          if (from_field == object.end() or
+              std::holds_alternative<nil>(from_field->second)) {
             if (FIELD::required)
               throw std::runtime_error(
                 std::format("unable to find required field {} in jayson object",
@@ -214,15 +250,81 @@ deserialize(val const& from)
               return;
           }
 
-          out.*Ts::ptr =
-            deserialize<member_ptr_destructure_t<decltype(Ts::ptr)>>(
-              from_field->second);
+          if constexpr (not is_enum_field<FIELD>)
+            out.*Ts::ptr =
+              deserialize<member_ptr_destructure_t<decltype(Ts::ptr)>>(
+                from_field->second);
+          else
+            out.*Ts::ptr = deserialize_enum_field<FIELD>(from_field->second);
         }(args),
         ...);
     },
     fields());
 
   return out;
+}
+
+template<has_jayson_descriptor_fields T>
+  requires(is_jayson_explicitly_constructible<T>)
+T
+deserialize(val const& from)
+{
+  using fields = T::jayson_fields;
+
+  if (not std::holds_alternative<obj>(from))
+    throw std::runtime_error(std::format(
+      "when attempting to deserialize a jayson value into a data structure, "
+      "expected an object but found {}",
+      std::visit(val_typename_visitor(), from)));
+
+  obj const& object = from.as<obj>();
+
+  return std::apply(
+    [&]<typename... Ts>(Ts&&... args) {
+      auto const fn = [&]<typename FIELD>(FIELD) {
+        auto const from_field = object.find(FIELD::name);
+
+        using out_type = member_ptr_destructure_t<decltype(FIELD::ptr)>;
+
+        if (from_field == object.end() or
+            std::holds_alternative<nil>(from_field->second)) {
+          if constexpr (FIELD::required)
+            throw std::runtime_error(
+              std::format("unable to find required field {} in jayson object",
+                          FIELD::name));
+          else
+            return out_type();
+        }
+
+        if constexpr (not is_enum_field<FIELD>)
+          return deserialize<out_type>(from_field->second);
+        else
+          return deserialize_enum_field<FIELD>(from_field->second);
+      };
+
+      return T{ fn(args)... };
+    },
+    fields());
+}
+
+template<typename FIELD>
+auto
+deserialize_enum_field(val const& from)
+{
+  if (not std::holds_alternative<std::string>(from))
+    throw std::runtime_error(
+      std::format("expected string while deserializing a jayson object into an "
+                  "enum, found <{}>",
+                  std::visit(val_typename_visitor(), from)));
+
+  auto const e = FIELD::descriptor::deserialize(from.as<std::string>());
+
+  if (e.has_value())
+    return *e;
+  else
+    throw std::runtime_error(std::format(
+      "while deserializing a string into an enum, got invalid value, {}",
+      from.as<std::string>()));
 }
 
 template<is_number T>
@@ -238,9 +340,7 @@ deserialize(val const& from)
 }
 
 template<typename T>
-  requires requires(T t) {
-    { std::optional<T>{ t } } -> std::same_as<T>;
-  }
+  requires std::same_as<T, decltype(std::optional{ std::declval<T>() })>
 T inline deserialize(val const& from)
 {
   using Tc = type_consolidator::get<typename T::value_type>;
@@ -271,21 +371,24 @@ template<typename T>
 T inline deserialize(val const& from)
 {
   if (not std::holds_alternative<array>(from))
-    throw std::runtime_error(std::format(
-      "expected an array while deserializing a jayson object, found <{}>",
-      std::visit(val_typename_visitor(), from)));
+    throw std::runtime_error(
+      std::format("expected an array while deserializing a jayson object into "
+                  "a vector, found <{}>",
+                  std::visit(val_typename_visitor(), from)));
 
   auto const& arr = from.as<array>();
   T out;
+  using internal_type = T::value_type;
 
   for (auto const& t : arr) {
-    if (not std::holds_alternative<type_consolidator::get<T>>(t))
+    if (not std::holds_alternative<type_consolidator::get<internal_type>>(t))
       throw std::runtime_error(std::format(
         "expected an {} while deserializing a jayson object, found <{}>",
-        std::visit(val_typename_visitor(), val(type_consolidator::get<T>())),
+        std::visit(val_typename_visitor(),
+                   val(type_consolidator::get<internal_type>())),
         std::visit(val_typename_visitor(), t)));
 
-    out.push_back(deserialize<typename T::value_type>(t));
+    out.push_back(deserialize<internal_type>(t));
   }
 
   return out;
@@ -296,21 +399,24 @@ template<typename T>
 T inline deserialize(val const& from)
 {
   if (not std::holds_alternative<array>(from))
-    throw std::runtime_error(std::format(
-      "expected an array while deserializing a jayson object, found <{}>",
-      std::visit(val_typename_visitor(), from)));
+    throw std::runtime_error(
+      std::format("expected an array while deserializing a jayson object into "
+                  "a set, found <{}>",
+                  std::visit(val_typename_visitor(), from)));
 
+  using internal_type = T::value_type;
   auto const& arr = from.as<array>();
   T out;
 
   for (auto const& t : arr) {
-    if (not std::holds_alternative<type_consolidator::get<T>>(t))
+    if (not std::holds_alternative<type_consolidator::get<internal_type>>(t))
       throw std::runtime_error(std::format(
         "expected an {} while deserializing a jayson object, found <{}>",
-        std::visit(val_typename_visitor(), val(type_consolidator::get<T>())),
+        std::visit(val_typename_visitor(),
+                   val(type_consolidator::get<internal_type>())),
         std::visit(val_typename_visitor(), t)));
 
-    out.insert(deserialize<typename T::value_type>(t));
+    out.insert(deserialize<internal_type>(t));
   }
 
   return out;
@@ -321,21 +427,24 @@ template<typename T>
 T inline deserialize(val const& from)
 {
   if (not std::holds_alternative<array>(from))
-    throw std::runtime_error(std::format(
-      "expected an array while deserializing a jayson object, found <{}>",
-      std::visit(val_typename_visitor(), from)));
+    throw std::runtime_error(
+      std::format("expected an array while deserializing a jayson object into "
+                  "a list, found <{}>",
+                  std::visit(val_typename_visitor(), from)));
 
+  using internal_type = T::value_type;
   auto const& arr = from.as<array>();
   T out;
 
   for (auto const& t : arr) {
-    if (not std::holds_alternative<type_consolidator::get<T>>(t))
+    if (not std::holds_alternative<type_consolidator::get<internal_type>>(t))
       throw std::runtime_error(std::format(
         "expected an {} while deserializing a jayson object, found <{}>",
-        std::visit(val_typename_visitor(), val(type_consolidator::get<T>())),
+        std::visit(val_typename_visitor(),
+                   val(type_consolidator::get<internal_type>())),
         std::visit(val_typename_visitor(), t)));
 
-    out.push_back(deserialize<typename T::value_type>(t));
+    out.push_back(deserialize<internal_type>(t));
   }
 
   return out;
@@ -346,10 +455,12 @@ template<typename T>
 T inline deserialize(val const& from)
 {
   if (not std::holds_alternative<array>(from))
-    throw std::runtime_error(std::format(
-      "expected an array while deserializing a jayson object, found <{}>",
-      std::visit(val_typename_visitor(), from)));
+    throw std::runtime_error(
+      std::format("expected an array while deserializing a jayson object into "
+                  "an array, found <{}>",
+                  std::visit(val_typename_visitor(), from)));
 
+  using internal_type = T::value_type;
   auto const& arr = from.as<array>();
   auto constexpr size = array_size_destructure_v<T>;
   T into;
@@ -360,13 +471,14 @@ T inline deserialize(val const& from)
   for (auto i = 0; i < size; i++) {
     auto const& t = arr.at(i);
 
-    if (not std::holds_alternative<type_consolidator::get<T>>(t))
+    if (not std::holds_alternative<type_consolidator::get<internal_type>>(t))
       throw std::runtime_error(std::format(
         "expected an {} while deserializing a jayson object, found <{}>",
-        std::visit(val_typename_visitor(), val(type_consolidator::get<T>())),
+        std::visit(val_typename_visitor(),
+                   val(type_consolidator::get<internal_type>())),
         std::visit(val_typename_visitor(), t)));
 
-    into[i] = deserialize<typename T::value_type>(t);
+    into[i] = deserialize<internal_type>(t);
   }
 
   return into;
@@ -377,9 +489,10 @@ template<typename T>
 T inline deserialize(val const& from)
 {
   if (not std::holds_alternative<obj>(from))
-    throw std::runtime_error(std::format(
-      "expected an obj while deserializing a jayson object, found <{}>",
-      std::visit(val_typename_visitor(), from)));
+    throw std::runtime_error(
+      std::format("expected an obj while deserializing a jayson object into a "
+                  "map, found <{}>",
+                  std::visit(val_typename_visitor(), from)));
 
   auto const& arr = from.as<obj>();
 
@@ -390,7 +503,7 @@ T inline deserialize(val const& from)
     if (not std::holds_alternative<T_casted>(v))
       throw std::runtime_error(
         std::format("expected an {} while deserializing a jayson object into a "
-                    "map, found <{}>",
+                    "found <{}>",
                     std::visit(val_typename_visitor(), val(T_casted())),
                     std::visit(val_typename_visitor(), from)));
 
@@ -423,9 +536,10 @@ template<typename T>
 T inline deserialize(val const& from)
 {
   if (not std::holds_alternative<array>(from))
-    throw std::runtime_error(std::format(
-      "expected an array while deserializing a jayson object, found <{}>",
-      std::visit(val_typename_visitor(), from)));
+    throw std::runtime_error(
+      std::format("expected an array while deserializing a jayson object into "
+                  "a tuple, found <{}>",
+                  std::visit(val_typename_visitor(), from)));
 
   return _deser_impl_tupl<T>(from, index_sequence_for_tuple<T>::value);
 }
@@ -433,12 +547,21 @@ T inline deserialize(val const& from)
 template<typename T>
   requires(has_jayson_descriptor_fields<T>)
 auto inline serialize(T const& t);
+
 template<typename T>
   requires(not has_jayson_descriptor_fields<T>)
 auto inline serialize(T const& t);
 
 template<typename... Ts>
 auto inline serialize(std::tuple<Ts...> const& t);
+
+template<typename FIELD>
+auto inline serialize_enum(auto const e)
+{
+  std::string out;
+  out = FIELD::descriptor::serialize(e);
+  return val(out);
+}
 
 template<typename T>
 auto inline serialize(std::vector<T> const& t)
@@ -520,9 +643,16 @@ auto inline serialize(T const& t)
 
   std::apply(
     [&]<typename... FIELDS>(FIELDS&&...) {
-      (out.insert_or_assign(std::string(FIELDS::name),
-                            serialize(t.*FIELDS::ptr)),
-       ...);
+      (
+        [&]<typename FIELD>() {
+          if constexpr (not is_enum_field<FIELD>)
+            out.insert_or_assign(std::string(FIELD::name),
+                                 serialize(t.*FIELD::ptr));
+          else
+            out.insert_or_assign(std::string(FIELD::name),
+                                 serialize_enum<FIELD>(t.*FIELDS::ptr));
+        }.template operator()<FIELDS>(),
+        ...);
     },
     typename T::jayson_fields());
 

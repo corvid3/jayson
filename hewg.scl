@@ -1,0 +1,24 @@
+[hewg]
+version = "0.4.0"
+type = "headers"
+
+[project]
+version = "0.1.0"
+org = "crow"
+name = "jayson"
+description = "single header json library for c++"
+authors = { "crow" }
+
+[depends]
+internal = { }
+external = { }
+
+[cxx]
+flags = { }
+std = 23
+sources = { }
+
+[c]
+flags = { }
+std = 17
+sources = { }
